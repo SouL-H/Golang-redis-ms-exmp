@@ -1,28 +1,28 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"time"
+
+	"github.com/go-redis/redis/v8"
 )
 
 func main() {
-	http.HandleFunc("/api", Handler)
+	api := NewAPI()
+	http.HandleFunc("/api", api.Handler)
 	http.ListenAndServe(":8080", nil)
 }
 
-func CheckErr(err error) {
-	if err != nil {
-		log.Fatalf("Failed: %v", err)
-
-	}
-}
-
-func Handler(w http.ResponseWriter, r *http.Request) {
+func (a *API) Handler(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query().Get("q")
-	data, err := getData(q)
+	data, cacheHit, err := a.getData(r.Context(), q)
 
 	if err != nil {
 		log.Fatalf("Failed get Data: %v", err)
@@ -30,46 +30,64 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := APIResponse{
-		Cache: false,
+		Cache: cacheHit,
 		Data:  data,
 	}
 	err = json.NewEncoder(w).Encode(resp)
 	if err != nil {
 		log.Fatalf("Failed: %v", err)
 		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 }
-func getData(q string) ([]APIResponseJson, error) {
-	//Cache
-	escapeQ := url.PathEscape(q) //URL parse
+func (a *API) getData(ctx context.Context, q string) ([]APIResponseJson, bool, error) {
+	//Caching
+	val, err := a.cache.Get(ctx, q).Result()
+	if err == redis.Nil {
+		escapeQ := url.PathEscape(q) //URL parse
 
-	addr := fmt.Sprintf("https://nominatim.openstreetmap.org/search?q=%s&format=json", escapeQ)
-	resp, err := http.Get(addr) //Response data
-	if err != nil {
-		return nil, err
+		addr := fmt.Sprintf("https://nominatim.openstreetmap.org/search?q=%s&format=json", escapeQ)
+		resp, err := http.Get(addr) //Response data
+		if err != nil {
+			return nil, false, err
+		}
+		data := make([]APIResponseJson, 0)
+		err = json.NewDecoder(resp.Body).Decode(&data)
+		if err != nil {
+			return nil, false, err
+		}
+		b, err := json.Marshal(data)
+		if err != nil {
+			return nil, false, err
+		}
+		err = a.cache.Set(ctx, q, bytes.NewBuffer(b).Bytes(), time.Second*90).Err() //Delete after 90sec
+		return data, false, err
+	} else if err != nil {
+		fmt.Println("Error calling redis")
+		return nil, false, err
+	} else {
+		data := make([]APIResponseJson, 0)
+		err := json.Unmarshal(bytes.NewBufferString(val).Bytes(), &data)
+		if err != nil {
+			return nil, false, err
+		}
+		return data, true, nil
 	}
-	data := make([]APIResponseJson, 0)
-	err = json.NewDecoder(resp.Body).Decode(&data)
-	CheckErr(err)
-	return data, err
+
 }
 
-type APIResponse struct {
-	Cache bool              `json:"cache"`
-	Data  []APIResponseJson `json:"data"`
+type API struct {
+	cache *redis.Client
 }
 
-type APIResponseJson struct {
-	PlaceID     int      `json:"place_id"`
-	License     string   `json:"license"`
-	OsmType     string   `json:"osm_type"`
-	OsmID       int      `json:"osm_id"`
-	Boundingbox []string `json:"boundingbox"`
-	Lat         string   `json:"lat"`
-	Lon         string   `json:"lon"`
-	DisplayName string   `json:"display_name"`
-	Class       string   `json:"class"`
-	Type        string   `json:"type"`
-	Importance  float64  `json:"importance"`
-	Icon        string   `json:"icon"`
+func NewAPI() *API {
+	redisAddress := fmt.Sprintf("%s:6379", os.Getenv("REDIS_URL")) //Docker
+	rdb := redis.NewClient(&redis.Options{
+		Addr:     redisAddress,
+		Password: "",
+		DB:       0,
+	})
+	return &API{
+		cache: rdb,
+	}
 }
