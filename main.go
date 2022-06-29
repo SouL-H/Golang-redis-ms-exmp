@@ -17,7 +17,7 @@ import (
 func main() {
 	api := NewAPI()
 	http.HandleFunc("/api", api.Handler)
-	http.ListenAndServe(":8080", nil)
+	http.ListenAndServe(fmt.Sprintf(":%s",os.Getenv("PORT")), nil)
 }
 
 func (a *API) Handler(w http.ResponseWriter, r *http.Request) {

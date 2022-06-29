@@ -47,3 +47,5 @@ But it is deleted after 90 seconds!
     <img src="./img/secondQuery.png"  style="width:550px;" alt="Observer">
 
 </p>
+
+#### Thank You devtopics
